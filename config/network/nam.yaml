@@ -6,7 +6,6 @@ in_channels:
  - 1
  - 1
  - 1
-#  - 1
 
 hidden_channels:
  - 20
@@ -15,7 +14,6 @@ hidden_channels:
  - 20
  - 20
  - 20
-#  - 20
 
 
 kernel_size:
@@ -25,4 +23,3 @@ kernel_size:
   - 17
   - 11
   - 11
-#   - 17

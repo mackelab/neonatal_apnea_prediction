@@ -5,7 +5,7 @@ defaults:
 dataset:
   dataset_mode: stacked
   signal_types:
-    - Thorax
+    - TA
 
 network:
   kernel_size: 17

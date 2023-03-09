@@ -1,6 +1,0 @@
-# @package _global_
-defaults:
-  - override /network: gap_sweep
-  
-dataset:
-  dataset_mode: stacked
