@@ -1,0 +1,4 @@
+self: gap
+in_channels: 1
+hidden_channels: 20
+kernel_size: 17

@@ -1,0 +1,5 @@
+defaults:
+  - meta: default
+  - dataset: neonatal
+  - network: nam
+  - optimizer: optimizer

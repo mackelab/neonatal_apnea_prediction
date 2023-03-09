@@ -1,0 +1,3 @@
+# @package _global_
+dataset:
+  away: 36000 # 180s -> 3 * 60 * 200

@@ -1,0 +1,44 @@
+ids:
+  - "001"
+  - "002"
+  - "003"
+  ## - "004"
+  ## - "005"
+  ## - "006"
+  ## - "007"
+  ## - "008"
+  ## - "009"
+  ## - "010"
+  ## - "011"
+  ## - "012"
+  ## - "013"
+  ## - "014"
+  ## - "015"
+  ## - "016"
+  ## - "017"
+  ## - "018"
+  ## - "019"
+
+# preprocessing parameters
+dataset_mode: list
+adverse_events:
+  - APNEA-OBSTRUCTIVE
+  - APNEA-CENTRAL
+  - APNEA-MIXED
+  - HYPOPNEA-OBSTRUCTIVE
+  - HYPOPNEA-CENTRAL
+  - HYPOPNEA-MIXED
+cutter_events:
+  - ACTIVITY-MOVE
+signal_types:
+  - NP
+  - TA
+  - HR
+  - PR
+  - SpO2
+  - PCO2
+time_window: 6000 # 30s -> 30 * 200
+lag: 3000 # 15s -> 15 * 200 
+away: 36000 # 3min -> 3 * 60 * 200
+standardize: standard
+downsample: none

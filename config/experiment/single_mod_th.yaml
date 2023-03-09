@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - override /network: gap
+  
+dataset:
+  dataset_mode: stacked
+  signal_types:
+    - Thorax
+
+network:
+  kernel_size: 17

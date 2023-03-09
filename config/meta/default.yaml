@@ -1,0 +1,8 @@
+mode: online # disabled for sweep
+experiment: none
+tag: none
+notes: none
+data_path: "neonatal_robin_polysomnography"
+result_path: "results"
+
+seed: none
