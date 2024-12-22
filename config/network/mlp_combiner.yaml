@@ -1,19 +1,19 @@
-self: nam
+self: mlp_combiner
 in_channels:
-  - 1
-  - 1
-  - 1
-  - 1
-  - 1
-  - 1
+ - 1
+ - 1
+ - 1
+ - 1
+ - 1
+ - 1
 
 hidden_channels:
-  - 20
-  - 20
-  - 20
-  - 20
-  - 20
-  - 20
+ - 20
+ - 20
+ - 20
+ - 20
+ - 20
+ - 20
 
 # NOTE: order is crucial here, needs to fit the order in the dataset config
 kernel_size:
@@ -23,3 +23,5 @@ kernel_size:
   - 17
   - 11
   - 11
+
+mlp_hidden_dim: 64

@@ -1,8 +1,12 @@
-mode: online # disabled for sweep
-experiment: none
-tag: none
-notes: none
-data_path: "neonatal_robin_polysomnography"
-result_path: "results"
+mode: disabled # for using wandb, set to "online" after adding your wandb credentials
+experiment: null
+tag: null
+wandb_project: "neonatal"
+wandb_entity: "TODO"
+wandb_home: "TODO"
 
-seed: none
+data_path: "TODO" # path to dataset
+pickle_path: null
+result_path: "TODO"
+
+seed: null

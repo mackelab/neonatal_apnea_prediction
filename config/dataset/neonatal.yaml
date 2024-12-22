@@ -30,9 +30,10 @@ adverse_events:
   - HYPOPNEA-MIXED
 cutter_events:
   - ACTIVITY-MOVE
+# NOTE: order is crucial here, needs to fit the order in the network config
 signal_types:
   - NP
-  - TA
+  - Thorax
   - HR
   - PR
   - SpO2

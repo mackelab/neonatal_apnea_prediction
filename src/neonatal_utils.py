@@ -1,17 +1,21 @@
 import logging
 import os
 from datetime import datetime
+from random import shuffle
 
 import numpy as np
 import pandas as pd
+import scipy
 import torch
-from numba import jit
+
 from pyedflib import highlevel
 from scipy.signal import decimate
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler, WeightedRandomSampler
 
 log = logging.getLogger(__name__)
 
+
+# Dict for reading in the signals, together with the sampling frequency
 SIGNAL_TYPE = {
     "EKG": ("EKG", 200),
     "Pleth Radical": ("PR", 100),
@@ -25,13 +29,9 @@ SIGNAL_TYPE = {
 }
 
 
-# Read in list of raw signals.
+# Read in list of raw signals. Create pickle files for faster access.
 def read_data(pat_id, file_path):
-    """
-    Align raw signal (.edf file) with annotation (.txt file) and return dictionary of signals.
-    """
-
-    log.info(f"Reading ID {pat_id}.")
+    print(f"Reading ID {pat_id}.")
 
     signals, signal_headers, header = highlevel.read_edf(
         os.path.join(file_path, f"signals{pat_id}.edf")
@@ -44,9 +44,8 @@ def read_data(pat_id, file_path):
             key, freq = SIGNAL_TYPE[sig_header["label"]]
             all_signals[key] = np.repeat(sig, 200 // freq)
         else:
-            # Log unkown signal headers.
-            log.info("Ignore unknown Signal Header")
-            log.info(f"##{ sig_header['label'] }##")
+            # Log skipped signal types.
+            print(f"Skipped { sig_header['label'] }")
             continue
 
     annotations = pd.read_csv(
@@ -97,7 +96,6 @@ def read_data(pat_id, file_path):
     return {k: v[annotation_start:annotation_stop] for k, v in all_signals.items()}
 
 
-@jit
 def sum_from_left(arr):
     res = np.zeros_like(arr)
     sumi = 0
@@ -110,7 +108,6 @@ def sum_from_left(arr):
     return res
 
 
-@jit
 def sum_from_right(arr):
     temp = sum_from_left(arr[::-1])
     return temp[::-1]
@@ -127,20 +124,12 @@ def create_slices(cutter):
 
 
 def standardize(arr):
-    """
-    Standardize numpy array.
-    """
-
     arr_mean = np.mean(arr)
     arr_std = np.std(arr)
     return (arr - arr_mean) / (arr_std if (arr_std > 0.0) else 1.0)
 
 
 def normalize_range(signal, lower_source, upper_source, lower_target, upper_target):
-    """
-    Range normalize numpy array given lower and upper tresholds.
-    """
-
     assert lower_source < upper_source
     assert lower_target < upper_target
 
@@ -151,10 +140,6 @@ def normalize_range(signal, lower_source, upper_source, lower_target, upper_targ
 
 
 def create_time_windows(anti_adverse_events, cutter, window_size, away, lag):
-    """
-    Create classification time windows with the specified lag and distance from adverse events.
-    """
-
     assert away >= window_size + lag
 
     increasing = sum_from_left(anti_adverse_events)
@@ -162,7 +147,7 @@ def create_time_windows(anti_adverse_events, cutter, window_size, away, lag):
     slice_ls = create_slices(cutter)
 
     slices_and_labels = []
-    for ss in slice_ls[:-1]:
+    for ss in slice_ls[:-1]:  # Throw away in last slice.
         decr_min = np.min(decreasing[ss])
         decr_max = np.max(decreasing[ss]) + 1
         incr_min = np.min(increasing[ss])
@@ -196,10 +181,6 @@ def create_time_windows(anti_adverse_events, cutter, window_size, away, lag):
 
 
 class NeoNatal(Dataset):
-    """
-    Dataset providing classification time windows to the classification model.
-    """
-
     def __init__(
         self,
         pat_id,
@@ -213,7 +194,7 @@ class NeoNatal(Dataset):
         away,
     ):
         super().__init__()
-        self.pat_id = pat_id
+        self.pat_id = pat_id  # for logging
         self.dataset_mode = dataset_mode
         self.signal_types = signal_types
         self.adverse_events = adverse_events
@@ -223,8 +204,7 @@ class NeoNatal(Dataset):
         self.away = away
         self.signal_dict = signal_dict
 
-        # Adverse events on which distances are calulated on. These are the anti-adverse events!
-        # That is, 1 - adverse_event_mask.
+        # Adverse events on which distances are calulated on.
         self.adverse_events_aggregated = 1 - np.column_stack(
             [self.signal_dict[event] for event in self.adverse_events]
         ).max(axis=1)
@@ -255,9 +235,16 @@ class NeoNatal(Dataset):
         )
 
         # Add the processed signal time windows here.
-        self.time_window_df["sig"] = self.time_window_df.apply(
-            lambda row: self.feature_extraction(row["slice"]), axis=1
-        )
+        if dataset_mode == "list" or dataset_mode == "stacked":
+            self.time_window_df["sig"] = self.time_window_df.apply(
+                lambda row: self.feature_extraction(row["slice"]), axis=1
+            )
+        elif dataset_mode == "features":
+            self.time_window_df["sig"] = self.time_window_df.apply(
+                lambda row: self.feature_engineering(row["slice"]), axis=1
+            )
+        else:
+            raise ValueError
 
     # Get undersampled elements for training.
     def __getitem__(self, index):
@@ -265,6 +252,8 @@ class NeoNatal(Dataset):
             return self._get_stacked(index)
         elif self.dataset_mode == "list":
             return self._get_list(index)
+        elif self.dataset_mode == "features":
+            return self._get_features(index)
         else:
             raise ValueError
 
@@ -276,17 +265,16 @@ class NeoNatal(Dataset):
         return self.time_window_df["label"].to_numpy()
 
     # Stacked mode requires that all signals have the same length.
-    # Trivially satisfied if only one signal is used.
+    # Or that only one channel is used.
     def _get_stacked(self, index):
         index_row = self.time_window_df.iloc[index]
-        x_s = torch.from_numpy(np.row_stack(index_row["sig"]).astype(np.float32))
+        sig_list = index_row["sig"]
+        if len(sig_list) > 1:
+            max_len = max([len(sig) for sig in sig_list])
+            sig_list = [np.repeat(sig, max_len // len(sig)) for sig in sig_list]
+        x_s = torch.from_numpy(np.row_stack(sig_list).astype(np.float32))
         y_s = torch.Tensor([np.float32(index_row["label"])])
         return (x_s, y_s)
-
-    def _get_stacked_verbose(self, index):
-        x_s, y_s = self._get_stacked(index)
-        ss = self.time_window_df.iloc[index]["slice"]
-        return (x_s, y_s, ss)
 
     def _get_list(self, index):
         index_row = self.time_window_df.iloc[index]
@@ -297,10 +285,11 @@ class NeoNatal(Dataset):
         y_s = torch.Tensor([np.float32(index_row["label"])])
         return (x_s, y_s)
 
-    def _get_list_verbose(self, index):
-        x_s, y_s = self._get_list(index)
-        ss = self.time_window_df.iloc[index]["slice"]
-        return (x_s, y_s, ss)
+    def _get_features(self, index):
+        index_row = self.time_window_df.iloc[index]
+        x_s = torch.from_numpy(index_row["sig"].astype(np.float32))
+        y_s = torch.Tensor([np.float32(index_row["label"])])
+        return (x_s, y_s)
 
     def feature_extraction(self, ss):
         lower_range = -1.0
@@ -309,6 +298,7 @@ class NeoNatal(Dataset):
         processed_windows = []
         for signal_type in self.signal_types:
             processed_window = None
+
             # 5 Hz
             if signal_type == "NP":
                 np_decimate_one = 10
@@ -320,7 +310,7 @@ class NeoNatal(Dataset):
                     )
                 )
             # 5Hz
-            elif signal_type == "TA":
+            elif signal_type == "Thorax":
                 thorax_select = 4
                 thorax_decimate = 10
                 processed_window = standardize(
@@ -367,7 +357,8 @@ class NeoNatal(Dataset):
                 spo2_upper = 100.0
                 processed_window = normalize_range(
                     decimate(
-                        self.signal_dict["SpO2"][ss][::spo2_select], spo2_decimate
+                        self.signal_dict["SpO2"][ss][::spo2_select],
+                        spo2_decimate,
                     ),
                     spo2_lower,
                     spo2_upper,
@@ -382,7 +373,8 @@ class NeoNatal(Dataset):
                 pco2_upper = 70.0
                 processed_window = normalize_range(
                     decimate(
-                        self.signal_dict["PCO2"][ss][::pco2_select], pco2_decimate
+                        self.signal_dict["PCO2"][ss][::pco2_select],
+                        pco2_decimate,
                     ),
                     pco2_lower,
                     pco2_upper,
@@ -391,9 +383,248 @@ class NeoNatal(Dataset):
                 )
             else:
                 raise ValueError
+
             processed_windows.append(processed_window)
+
         return processed_windows
 
+    def feature_engineering(self, ss):
+        lower_range = -1.0
+        upper_range = 1.0
 
-if __name__ == "__main__":
-    pass
+        processed_windows = []
+        for signal_type in self.signal_types:
+            processed_window = None
+
+            if signal_type == "NP":
+                np_decimate_one = 10
+                np_decimate_two = 4
+                processed_window = standardize(
+                    decimate(
+                        decimate(self.signal_dict["NP"][ss], np_decimate_one),
+                        np_decimate_two,
+                    )
+                )
+                skew = skewness(processed_window)
+                kurt = kurtosis(processed_window)
+                spectral_cent = spectral_centroid(processed_window, 5)
+                spectral_sp = spectral_spread(processed_window, 5)
+                spectral_sk = spectral_skewness(processed_window, 5)
+                spectral_kt = spectral_kurtosis(processed_window, 5)
+                features = [
+                    skew,
+                    kurt,
+                    spectral_cent,
+                    spectral_sp,
+                    spectral_sk,
+                    spectral_kt,
+                ]
+            elif signal_type == "Thorax":
+                thorax_select = 4
+                thorax_decimate = 10
+                processed_window = standardize(
+                    standardize(
+                        decimate(
+                            self.signal_dict["Thorax"][ss][::thorax_select],
+                            thorax_decimate,
+                        )
+                    )
+                    + standardize(
+                        decimate(
+                            self.signal_dict["Abdomen"][ss][::thorax_select],
+                            thorax_decimate,
+                        )
+                    )
+                )
+                skew = skewness(processed_window)
+                kurt = kurtosis(processed_window)
+                spectral_cent = spectral_centroid(processed_window, 5)
+                spectral_sp = spectral_spread(processed_window, 5)
+                spectral_sk = spectral_skewness(processed_window, 5)
+                spectral_kt = spectral_kurtosis(processed_window, 5)
+                features = [
+                    skew,
+                    kurt,
+                    spectral_cent,
+                    spectral_sp,
+                    spectral_sk,
+                    spectral_kt,
+                ]
+            elif signal_type == "PR":
+                pr_decimate_one = 10
+                pr_decimate_two = 4
+                processed_window = standardize(
+                    decimate(
+                        decimate(self.signal_dict["PR"][ss], pr_decimate_one),
+                        pr_decimate_two,
+                    )
+                )
+                skew = skewness(processed_window)
+                kurt = kurtosis(processed_window)
+                spectral_cent = spectral_centroid(processed_window, 5)
+                spectral_sp = spectral_spread(processed_window, 5)
+                spectral_sk = spectral_skewness(processed_window, 5)
+                spectral_kt = spectral_kurtosis(processed_window, 5)
+                features = [
+                    skew,
+                    kurt,
+                    spectral_cent,
+                    spectral_sp,
+                    spectral_sk,
+                    spectral_kt,
+                ]
+            elif signal_type == "HR":
+                hr_select = 200
+                hr_lower = 50.0
+                hr_upper = 240.0
+                processed_window = normalize_range(
+                    self.signal_dict["HR"][ss][::hr_select],
+                    hr_lower,
+                    hr_upper,
+                    lower_range,
+                    upper_range,
+                )
+                first_moment = np.mean(processed_window)
+                min_max = np.max(processed_window) - np.min(processed_window)
+                features = [first_moment, min_max]
+            elif signal_type == "SpO2":
+                spo2_select = 100
+                spo2_decimate = 2
+                spo2_lower = 60.0
+                spo2_upper = 100.0
+                processed_window = normalize_range(
+                    decimate(
+                        self.signal_dict["SpO2"][ss][::spo2_select],
+                        spo2_decimate,
+                    ),
+                    spo2_lower,
+                    spo2_upper,
+                    lower_range,
+                    upper_range,
+                )
+                first_moment = np.mean(processed_window)
+                min_max = np.max(processed_window) - np.min(processed_window)
+                features = [first_moment, min_max]
+            elif signal_type == "PCO2":
+                pco2_select = 100
+                pco2_decimate = 2
+                pco2_lower = 30.0
+                pco2_upper = 70.0
+                processed_window = normalize_range(
+                    decimate(
+                        self.signal_dict["PCO2"][ss][::pco2_select],
+                        pco2_decimate,
+                    ),
+                    pco2_lower,
+                    pco2_upper,
+                    lower_range,
+                    upper_range,
+                )
+                first_moment = np.mean(processed_window)
+                min_max = np.max(processed_window) - np.min(processed_window)
+                features = [first_moment, min_max]
+            else:
+                raise ValueError
+            processed_windows.extend(features)
+
+        print(processed_windows)
+        return np.array(processed_windows)
+
+
+# NOTE: C1==C2 is not garantueed. Only in expectation.
+class BalancedSampler(WeightedRandomSampler):
+    def __init__(self, dataset, replacement=False):
+        labels = dataset._get_labels()
+
+        classes, counts = np.unique(labels, return_counts=True)
+        weights = np.zeros_like(labels, dtype=float)
+        for val, nums in zip(classes, counts):
+            weights[labels == val] = 1.0 / nums
+        num_samples = int(min(counts) * len(counts))
+
+        super().__init__(
+            weights=weights, num_samples=num_samples, replacement=replacement
+        )
+
+    def __iter__(self):
+        return super().__iter__()
+
+    def __len__(self):
+        return super().__len__()
+
+
+class MultiDatasetBalancedSampler(Sampler):
+    def __init__(self, concat_dataset, replacement=False):
+        self.concat_dataset = concat_dataset
+        self.replacement = replacement
+
+    def __iter__(self):
+        offset = 0
+        all_indices = []
+        for dat in self.concat_dataset.datasets:
+            indices = list(BalancedSampler(dat, replacement=self.replacement))
+            offset_indicies = [idx + offset for idx in indices]
+            all_indices.extend(offset_indicies)
+            offset += len(dat)
+        shuffle(all_indices)
+
+        yield from iter(all_indices)
+
+    def __len__(self):
+        length = 0
+        for dat in self.concat_dataset.datasets:
+            length += len(BalancedSampler(dat, replacement=self.replacement))
+        return length
+
+
+def skewness(signal):
+    return scipy.stats.skew(signal)
+
+
+def kurtosis(signal):
+    return scipy.stats.kurtosis(signal)
+
+
+def calc_fft(signal, fs):
+    fmag = np.abs(np.fft.rfft(signal))
+    f = np.fft.rfftfreq(len(signal), d=1 / fs)
+
+    return f.copy(), fmag.copy()
+
+
+def spectral_centroid(signal, fs):
+    f, fmag = calc_fft(signal, fs)
+    if not np.sum(fmag):
+        return 0
+    else:
+        return np.dot(f, fmag / np.sum(fmag))
+
+
+def spectral_spread(signal, fs):
+    f, fmag = calc_fft(signal, fs)
+    spect_centroid = spectral_centroid(signal, fs)
+
+    if not np.sum(fmag):
+        return 0
+    else:
+        return np.dot(((f - spect_centroid) ** 2), (fmag / np.sum(fmag))) ** 0.5
+
+
+def spectral_skewness(signal, fs):
+    f, fmag = calc_fft(signal, fs)
+    spect_centr = spectral_centroid(signal, fs)
+
+    if not spectral_spread(signal, fs):
+        return 0
+    else:
+        skew = ((f - spect_centr) ** 3) * (fmag / np.sum(fmag))
+        return np.sum(skew) / (spectral_spread(signal, fs) ** 3)
+
+
+def spectral_kurtosis(signal, fs):
+    f, fmag = calc_fft(signal, fs)
+    if not spectral_spread(signal, fs):
+        return 0
+    else:
+        spect_kurt = ((f - spectral_centroid(signal, fs)) ** 4) * (fmag / np.sum(fmag))
+        return np.sum(spect_kurt) / (spectral_spread(signal, fs) ** 4)

@@ -1,0 +1,3 @@
+self: mlp
+feature_dim: 24
+hidden_dim: 128

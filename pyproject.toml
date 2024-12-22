@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neonatal_apnea_prediction"
+version = "0.1.0"
+description = "Classify neonatal apneas and hypopneas in children with Pierre Robin syndrome"
+readme = "README.md"
+authors = [
+  {name = "Julius Vetter", email = "julius.vetter@uni-tuebingen.de"}
+]
+keywords = ["neonatal apnea", "machine learning", "healthcare"]
+
+requires-python = ">=3.8"
+
+dependencies = [
+   "numpy<2",  # https://github.com/pytorch/pytorch/issues/131668
+   "pandas",
+   "scikit-learn",
+   "scipy",
+   "torch",
+   "wandb",
+   "matplotlib",
+   "pyEDFlib",
+   "hydra-core",
+   "einops",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
